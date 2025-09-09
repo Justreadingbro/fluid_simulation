@@ -3,300 +3,134 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Mobile Fluid Simulation (JS)</title>
+  <title>Pixel Water Tilt</title>
   <style>
-    html,body{height:100%;margin:0;background:#0b1020;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto}
-    #ui{position:fixed;left:10px;top:10px;z-index:10;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);padding:8px;border-radius:8px}
-    button,input{font-size:14px}
-    canvas{display:block;width:100%;height:100vh}
-    .hint{opacity:.8;font-size:12px;margin-top:6px}
+    html,body{height:100%;margin:0;background:#fff;font-family:sans-serif}
+    #ui{position:fixed;left:10px;top:10px;z-index:20;background:rgba(0,0,0,0.45);color:#fff;padding:8px;border-radius:8px}
+    label{font-size:13px}
+    canvas{display:block;width:100%;height:100vh;background:#fff}
   </style>
 </head>
 <body>
   <div id="ui">
-    <button id="clearBtn">Clear</button>
-    <label style="margin-left:8px">Resolution
+    <label>Grid
       <select id="resSel">
-        <option value="64">Low</option>
-        <option value="96" selected>Medium</option>
-        <option value="128">High</option>
+        <option value="64">64</option>
+        <option value="96">96</option>
+        <option value="128" selected>128</option>
       </select>
     </label>
-    <div class="hint">Touch to add dye & drag for flow. Allow Motion permission on iOS (Settings ▶ Safari ▶ Motion & Orientation)</div>
+    <label>Sensitivity
+      <input id="sens" type="range" min="10" max="200" value="80" />
+    </label>
   </div>
+
   <canvas id="c"></canvas>
 
   <script>
-  // --- Simple grid-based fluid (adapted small stable-fluids-like solver) ---
-  // Works on desktop + mobile. Uses DeviceMotion / DeviceOrientation as gravity input.
-
   const canvas = document.getElementById('c');
-  const ctx = canvas.getContext('2d', {alpha:false});
+  const ctx = canvas.getContext('2d');
+  const resSel = document.getElementById('resSel');
+  const sensEl = document.getElementById('sens');
+
   let W = innerWidth, H = innerHeight;
   canvas.width = W; canvas.height = H;
 
-  // UI
-  const resSel = document.getElementById('resSel');
-  const clearBtn = document.getElementById('clearBtn');
+  let N = +resSel.value;
+  let cellW = Math.ceil(W / N), cellH = Math.ceil(H / N);
+  let grid;
 
-  // Grid params
-  let N = parseInt(resSel.value); // grid cells per row/col (square simulation)
-  let scaleX = 1, scaleY = 1; // mapping from grid to canvas
-
-  // Simulation fields
-  let size; // N*N
-  let u, v, uPrev, vPrev; // velocity x,y
-  let dens, densPrev; // dye
-  let diffusion = 0.0001, viscosity = 0.0001;
-  let dt = 0.9;
-
-  // accelerometer gravity vector
+  // gravity from device tilt
   let gravityX = 0, gravityY = 0;
 
-  function alloc() {
-    size = N*N;
-    u = new Float32Array(size); v = new Float32Array(size);
-    uPrev = new Float32Array(size); vPrev = new Float32Array(size);
-    dens = new Float32Array(size); densPrev = new Float32Array(size);
+  function alloc(){
+    grid = new Array(N*N).fill(0);
+    // fill bottom half with water pixels
+    for(let j=Math.floor(N/2); j<N; j++){
+      for(let i=0; i<N; i++){
+        grid[i+j*N] = 1;
+      }
+    }
   }
 
   function IX(x,y){
-    x = Math.max(0, Math.min(N-1, x));
-    y = Math.max(0, Math.min(N-1, y));
     return x + y*N;
   }
 
-  // Add source arrays
-  function addSource(x, s){ for(let i=0;i<size;i++) x[i]+=dt*s[i]; }
+  function step(){
+    let newGrid = new Array(N*N).fill(0);
+    const sens = (+sensEl.value)/100;
 
-  // Diffuse (using Jacobi relaxation)
-  function diffuse(b, x, x0, diff){
-    const a = dt * diff * (N-1)*(N-1);
-    for(let k=0;k<20;k++){
-      for(let j=1;j<N-1;j++){
-        for(let i=1;i<N-1;i++){
-          const idx = IX(i,j);
-          x[idx] = (x0[idx] + a*(x[IX(i-1,j)] + x[IX(i+1,j)] + x[IX(i,j-1)] + x[IX(i,j+1)])) / (1+4*a);
+    for(let j=0;j<N;j++){
+      for(let i=0;i<N;i++){
+        if(grid[IX(i,j)]>0){
+          // compute new pos based on gravity tilt
+          let nx = i + Math.sign(gravityX)*sens*0.1;
+          let ny = j + Math.sign(gravityY)*sens*0.1;
+
+          nx = Math.max(0, Math.min(N-1, Math.round(nx)));
+          ny = Math.max(0, Math.min(N-1, Math.round(ny)));
+
+          newGrid[IX(nx,ny)] = 1;
         }
       }
-      setBnd(b,x);
     }
+    grid = newGrid;
   }
 
-  // Advect field
-  function advect(b, d, d0, u, v){
-    const dt0 = dt * (N-1);
-    for(let j=1;j<N-1;j++){
-      for(let i=1;i<N-1;i++){
-        let x = i - dt0 * u[IX(i,j)];
-        let y = j - dt0 * v[IX(i,j)];
-        if(x<0.5) x=0.5; if(x>N-1.5) x=N-1.5;
-        if(y<0.5) y=0.5; if(y>N-1.5) y=N-1.5;
-        const i0 = Math.floor(x), i1 = i0+1;
-        const j0 = Math.floor(y), j1 = j0+1;
-        const s1 = x - i0, s0 = 1 - s1;
-        const t1 = y - j0, t0 = 1 - t1;
-        d[IX(i,j)] = s0*(t0*d0[IX(i0,j0)] + t1*d0[IX(i0,j1)]) + s1*(t0*d0[IX(i1,j0)] + t1*d0[IX(i1,j1)]);
-      }
-    }
-    setBnd(b,d);
-  }
+  function render(){
+    ctx.clearRect(0,0,W,H);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 0.5;
 
-  function setBnd(b, x){
-    for(let i=1;i<N-1;i++){
-      x[IX(i,0)]   = b===2 ? -x[IX(i,1)] : x[IX(i,1)];
-      x[IX(i,N-1)] = b===2 ? -x[IX(i,N-2)] : x[IX(i,N-2)];
-    }
-    for(let j=1;j<N-1;j++){
-      x[IX(0,j)]   = b===1 ? -x[IX(1,j)] : x[IX(1,j)];
-      x[IX(N-1,j)] = b===1 ? -x[IX(N-2,j)] : x[IX(N-2,j)];
-    }
-    x[IX(0,0)] = 0.5*(x[IX(1,0)]+x[IX(0,1)]);
-    x[IX(0,N-1)] = 0.5*(x[IX(1,N-1)]+x[IX(0,N-2)]);
-    x[IX(N-1,0)] = 0.5*(x[IX(N-2,0)]+x[IX(N-1,1)]);
-    x[IX(N-1,N-1)] = 0.5*(x[IX(N-2,N-1)]+x[IX(N-1,N-2)]);
-  }
-
-  // Projection to make velocity field divergence-free
-  function project(u, v, p, div){
-    const h = 1.0/(N-1);
-    for(let j=1;j<N-1;j++){
-      for(let i=1;i<N-1;i++){
-        div[IX(i,j)] = -0.5*h*(u[IX(i+1,j)]-u[IX(i-1,j)] + v[IX(i,j+1)]-v[IX(i,j-1)]);
-        p[IX(i,j)] = 0;
-      }
-    }
-    setBnd(0,div); setBnd(0,p);
-    for(let k=0;k<20;k++){
-      for(let j=1;j<N-1;j++){
-        for(let i=1;i<N-1;i++){
-          p[IX(i,j)] = (div[IX(i,j)] + p[IX(i-1,j)] + p[IX(i+1,j)] + p[IX(i,j-1)] + p[IX(i,j+1)])/4;
+    // draw grid
+    for(let j=0;j<N;j++){
+      for(let i=0;i<N;i++){
+        ctx.strokeRect(i*cellW, j*cellH, cellW, cellH);
+        if(grid[IX(i,j)]>0){
+          ctx.fillStyle = 'blue';
+          ctx.fillRect(i*cellW, j*cellH, cellW, cellH);
         }
       }
-      setBnd(0,p);
-    }
-    for(let j=1;j<N-1;j++){
-      for(let i=1;i<N-1;i++){
-        u[IX(i,j)] -= 0.5*(p[IX(i+1,j)]-p[IX(i-1,j)])/h;
-        v[IX(i,j)] -= 0.5*(p[IX(i,j+1)]-p[IX(i,j-1)])/h;
-      }
-    }
-    setBnd(1,u); setBnd(2,v);
-  }
-
-  function velStep(u, v, u0, v0, visc){
-    addSource(u, u0); addSource(v, v0);
-    // swap arrays - we will write into u0/v0 then copy back via diffuse/advect
-    [u0,u] = [u, u0]; // u old in u0
-    diffuse(1, u, u0, visc);
-    [v0,v] = [v, v0];
-    diffuse(2, v, v0, visc);
-    project(u, v, u0, v0);
-    [u0,u] = [u, u0]; [v0,v] = [v, v0];
-    advect(1, u, u0, u0, v0);
-    advect(2, v, v0, u0, v0);
-    project(u, v, u0, v0);
-  }
-
-  function densStep(x, x0, u, v, diff){
-    addSource(x, x0);
-    [x0,x] = [x, x0];
-    diffuse(0, x, x0, diff);
-    [x0,x] = [x, x0];
-    advect(0, x, x0, u, v);
-  }
-
-  // zero arrays
-  function clearFields(){
-    for(let i=0;i<size;i++){ u[i]=v[i]=uPrev[i]=vPrev[i]=dens[i]=densPrev[i]=0; }
-  }
-
-  // Mouse / touch input to inject dye and forces
-  let isDown=false, lastX=0, lastY=0;
-  function injectAt(pageX, pageY, dx=0, dy=0){
-    // map to grid coords
-    const gx = Math.floor((pageX / W) * N);
-    const gy = Math.floor((pageY / H) * N);
-    const radius = Math.max(1, Math.floor(N*0.035));
-    for(let j=-radius;j<=radius;j++){
-      for(let i=-radius;i<=radius;i++){
-        const x = gx+i, y = gy+j;
-        if(x<1||x>=N-1||y<1||y>=N-1) continue;
-        const idx = IX(x,y);
-        const dist = Math.sqrt(i*i+j*j);
-        if(dist>radius) continue;
-        dens[idx] += 80 * (1 - dist/radius);
-        u[idx] += dx*8;
-        v[idx] += dy*8;
-      }
     }
   }
 
-  // Event handlers
-  canvas.addEventListener('pointerdown', e=>{ isDown=true; lastX=e.clientX; lastY=e.clientY; injectAt(e.clientX,e.clientY); });
-  canvas.addEventListener('pointermove', e=>{ if(!isDown) return; const dx = (e.clientX - lastX)/Math.max(1, (W/ N)); const dy = (e.clientY - lastY)/Math.max(1, (H/ N)); injectAt(e.clientX,e.clientY, dx, dy); lastX=e.clientX; lastY=e.clientY; });
-  window.addEventListener('pointerup', ()=> isDown=false);
+  function loop(){
+    step();
+    render();
+    requestAnimationFrame(loop);
+  }
 
-  // Device motion for mobile tilt controls
   function handleMotion(e){
-    // prefer accelerationIncludingGravity if available
-    const ag = e.accelerationIncludingGravity || e.acceleration || {x:0,y:0,z:0};
-    // map device axes to canvas axes (may vary by device orientation)
+    const ag = e.accelerationIncludingGravity || {x:0,y:0,z:0};
     gravityX = ag.x || 0;
-    gravityY = ag.y || 0;
-    // tweak sign & scaling for nicer behavior
-    // On many phones tilting forward produces positive y - adjust if needed
+    gravityY = -(ag.y || 0);
   }
 
-  // iOS 13+ requires permission via DeviceMotionEvent.requestPermission()
   async function tryEnableMotion(){
     if(typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
       try{
         const res = await DeviceMotionEvent.requestPermission();
-        if(res==='granted') window.addEventListener('devicemotion', handleMotion);
-      }catch(err){ console.log('motion denied', err); }
+        if(res === 'granted') window.addEventListener('devicemotion', handleMotion);
+      }catch(err){ console.log('motion perm error', err); }
     } else {
-      // non iOS
       window.addEventListener('devicemotion', handleMotion);
     }
   }
 
-  // Rendering
-  function render(){
-    // draw density onto canvas
-    ctx.clearRect(0,0,W,H);
-    const img = ctx.createImageData(W, H);
-    const data = img.data;
-    // render by sampling density field to pixels
-    for(let y=0;y<H;y++){
-      const gy = (y / H) * (N-1);
-      const j0 = Math.floor(gy), j1 = Math.min(N-1, j0+1);
-      const ty = gy - j0;
-      for(let x=0;x<W;x++){
-        const gx = (x / W) * (N-1);
-        const i0 = Math.floor(gx), i1 = Math.min(N-1, i0+1);
-        const tx = gx - i0;
-        // bilinear sample
-        const d00 = dens[IX(i0,j0)], d10 = dens[IX(i1,j0)], d01 = dens[IX(i0,j1)], d11 = dens[IX(i1,j1)];
-        const d0 = d00*(1-tx)+d10*tx;
-        const d1 = d01*(1-tx)+d11*tx;
-        const densPix = d0*(1-ty)+d1*ty;
-        const idx = (x + y*W)*4;
-        // color mapping: purple-ish smoke
-        const c = Math.max(0, Math.min(255, Math.floor(densPix)));
-        data[idx] = Math.min(255, c*1.2 + 20); // r
-        data[idx+1] = Math.min(255, c*0.5 + 10); // g
-        data[idx+2] = Math.min(255, c*1.6 + 40); // b
-        data[idx+3] = 255;
-      }
-    }
-    ctx.putImageData(img,0,0);
-  }
-
-  // main loop
-  function step(){
-    // apply global gravity as a velocity source
-    // small array with gravity added to vPrev/uPrev
-    for(let j=0;j<N;j++){
-      for(let i=0;i<N;i++){
-        const idx = IX(i,j);
-        uPrev[idx] = gravityX * 0.02; // tune
-        vPrev[idx] = -gravityY * 0.02; // invert Y for screen coords
-      }
-    }
-    // also clear densPrev so dye source only from inputs
-    for(let i=0;i<size;i++) densPrev[i] = 0;
-
-    velStep(u, v, uPrev, vPrev, viscosity);
-    densStep(dens, densPrev, u, v, diffusion);
-
-    render();
-    requestAnimationFrame(step);
-  }
-
-  // Resize handling
   function onResize(){
     W = innerWidth; H = innerHeight; canvas.width = W; canvas.height = H;
-    // choose grid resolution based on selection but adapt to screen
-    N = parseInt(resSel.value);
-    // keep N not too large relative to screen to maintain perf
-    const maxDim = Math.max(W,H);
-    if(N > 160 && maxDim < 800) N = 128;
+    N = +resSel.value;
+    cellW = Math.ceil(W / N); cellH = Math.ceil(H / N);
     alloc();
-    clearFields();
   }
 
-  resSel.addEventListener('change', ()=>{ onResize(); });
-  clearBtn.addEventListener('click', ()=>{ clearFields(); });
-
+  resSel.addEventListener('change', ()=> onResize());
   window.addEventListener('resize', ()=> onResize());
 
-  // init and start
   onResize();
   tryEnableMotion();
-  requestAnimationFrame(step);
-
-  // Friendly tip: for iOS Safari, go to: Settings → Safari → Motion & Orientation to enable or grant permission prompt when page requests it.
+  loop();
   </script>
 </body>
 </html>
